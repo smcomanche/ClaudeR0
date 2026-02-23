@@ -1,0 +1,1087 @@
+#!/usr/bin/env python3
+"""Generate a mobile-friendly HTML trip page from the Moab spring break itinerary."""
+
+import re
+from pathlib import Path
+
+
+def parse_markdown(md_path: str) -> str:
+    """Read the markdown file and return its contents."""
+    return Path(md_path).read_text(encoding="utf-8")
+
+
+def build_html(md_content: str) -> str:
+    """Build the complete HTML page from the markdown content."""
+
+    # ── Helper: make Google Maps links from addresses ──
+    def maps_link(address: str) -> str:
+        return f"https://maps.google.com/?q={address.replace(' ', '+').replace(',', '%2C')}"
+
+    # ── CSS ──
+    css = r"""
+:root {
+  --sandstone: #d4a574;
+  --deep-red: #8b2500;
+  --warm-orange: #e07830;
+  --slate: #3d3d3d;
+  --tan: #f5e6d3;
+  --tan-light: #faf3eb;
+  --cream: #fdfaf6;
+  --text: #2c2c2c;
+  --text-muted: #6b6b6b;
+  --border: #e0d5c8;
+  --accent: #c0392b;
+  --success: #27ae60;
+  --nav-bg: #8b2500ee;
+  --card-bg: #ffffff;
+  --shadow: 0 2px 12px rgba(0,0,0,0.08);
+  --shadow-lg: 0 4px 24px rgba(0,0,0,0.12);
+}
+.dark {
+  --tan: #1a1410;
+  --tan-light: #221c16;
+  --cream: #181210;
+  --text: #e8ddd0;
+  --text-muted: #9a8b7a;
+  --border: #3a3228;
+  --card-bg: #231d17;
+  --shadow: 0 2px 12px rgba(0,0,0,0.3);
+  --shadow-lg: 0 4px 24px rgba(0,0,0,0.4);
+  --nav-bg: #1a0e08ee;
+  --slate: #c8bdb0;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; scroll-padding-top: 60px; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  background: var(--cream);
+  color: var(--text);
+  line-height: 1.6;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* ── Sticky Nav ── */
+.nav {
+  position: sticky; top: 0; z-index: 100;
+  background: var(--nav-bg);
+  backdrop-filter: blur(10px);
+  padding: 8px 12px;
+  display: flex; align-items: center; gap: 6px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.nav::-webkit-scrollbar { display: none; }
+.nav a, .nav button {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px; font-weight: 600;
+  text-decoration: none;
+  color: #fff;
+  background: rgba(255,255,255,0.15);
+  border: 1px solid rgba(255,255,255,0.2);
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.nav a:hover, .nav button:hover { background: rgba(255,255,255,0.3); }
+.nav a.active { background: var(--warm-orange); border-color: var(--warm-orange); }
+.nav .today-btn { background: var(--success); border-color: var(--success); }
+.nav .dark-toggle {
+  margin-left: auto;
+  background: rgba(255,255,255,0.1);
+  font-size: 16px; padding: 6px 10px;
+}
+
+/* ── Hero ── */
+.hero {
+  background: linear-gradient(135deg, #8b2500 0%, #c0392b 40%, #e07830 100%);
+  color: #fff;
+  padding: 60px 20px 40px;
+  text-align: center;
+}
+.hero h1 { font-size: 28px; font-weight: 800; margin-bottom: 6px; letter-spacing: -0.5px; }
+.hero .subtitle { font-size: 16px; opacity: 0.9; margin-bottom: 10px; }
+.hero .family {
+  display: flex; justify-content: center; gap: 12px; flex-wrap: wrap;
+  font-size: 14px; opacity: 0.85;
+}
+.hero .family span {
+  background: rgba(255,255,255,0.15);
+  padding: 4px 12px; border-radius: 16px;
+}
+
+/* ── Day Cards ── */
+.container { max-width: 720px; margin: 0 auto; padding: 16px; }
+.day-card {
+  background: var(--card-bg);
+  border-radius: 16px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.day-header {
+  padding: 18px 20px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between;
+  user-select: none; -webkit-user-select: none;
+  transition: background 0.2s;
+}
+.day-header:hover { background: var(--tan-light); }
+.day-header .info h2 { font-size: 18px; font-weight: 700; color: var(--deep-red); }
+.dark .day-header .info h2 { color: var(--warm-orange); }
+.day-header .info .route { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+.day-header .chevron {
+  font-size: 20px; color: var(--text-muted);
+  transition: transform 0.3s;
+}
+.day-card.open .day-header .chevron { transform: rotate(180deg); }
+.day-body { display: none; padding: 0 20px 20px; }
+.day-card.open .day-body { display: block; }
+.day-card.today-highlight { border-left: 4px solid var(--success); }
+
+/* ── Reminder banners ── */
+.reminder {
+  background: linear-gradient(90deg, #fff3cd, #ffeeba);
+  border-left: 4px solid #f0ad4e;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.dark .reminder { background: linear-gradient(90deg, #3a3018, #332a12); }
+.warning {
+  background: linear-gradient(90deg, #fde8e8, #fbd5d5);
+  border-left: 4px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.dark .warning { background: linear-gradient(90deg, #3a1818, #331212); }
+
+/* ── Timeline entries ── */
+.period-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--warm-orange);
+  margin: 20px 0 8px; padding-bottom: 4px;
+  border-bottom: 2px solid var(--tan);
+}
+.period-label:first-child { margin-top: 0; }
+.activity {
+  position: relative;
+  padding: 14px 16px 14px 36px;
+  margin: 8px 0;
+  background: var(--tan-light);
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.activity::before {
+  content: '';
+  position: absolute; left: 14px; top: 22px;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--sandstone);
+  border: 2px solid var(--card-bg);
+}
+.activity.checked-off { opacity: 0.5; }
+.activity .act-header {
+  display: flex; align-items: flex-start; gap: 8px;
+}
+.activity .act-header input[type="checkbox"] {
+  margin-top: 4px; flex-shrink: 0;
+  width: 18px; height: 18px;
+  accent-color: var(--warm-orange);
+}
+.activity h3 { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+.activity .desc { font-size: 14px; color: var(--text-muted); margin-bottom: 8px; }
+.activity .meta {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  font-size: 12px;
+}
+.activity .meta .tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--tan);
+  padding: 3px 10px;
+  border-radius: 12px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.dark .activity .meta .tag { background: var(--border); }
+.activity .meta a.tag { color: var(--deep-red); font-weight: 600; }
+.dark .activity .meta a.tag { color: var(--warm-orange); }
+.activity .meta a.tag:hover { background: var(--sandstone); color: #fff; }
+.trail-details {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--tan);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.dark .trail-details { background: var(--border); }
+.trail-details ul { list-style: none; padding: 0; }
+.trail-details li { padding: 3px 0; }
+.trail-details li strong { color: var(--deep-red); }
+.dark .trail-details li strong { color: var(--warm-orange); }
+
+/* ── Lodging card ── */
+.lodging {
+  background: linear-gradient(135deg, var(--tan-light), var(--tan));
+  border: 2px solid var(--sandstone);
+  border-radius: 12px;
+  padding: 16px;
+  margin: 12px 0;
+}
+.lodging h3 { color: var(--deep-red); margin-bottom: 8px; }
+.dark .lodging h3 { color: var(--warm-orange); }
+.lodging .detail-row {
+  display: flex; gap: 8px; font-size: 14px; padding: 3px 0;
+  align-items: flex-start;
+}
+.lodging .detail-row .label {
+  font-weight: 700; min-width: 90px; flex-shrink: 0;
+}
+.lodging .detail-row a { color: var(--deep-red); }
+.dark .lodging .detail-row a { color: var(--warm-orange); }
+.confirm-code {
+  display: inline-block;
+  background: var(--deep-red);
+  color: #fff;
+  padding: 2px 10px;
+  border-radius: 6px;
+  font-family: monospace;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+
+/* ── Susan's Routes ── */
+.special-section {
+  background: var(--card-bg);
+  border-radius: 16px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.special-header {
+  padding: 18px 20px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: space-between;
+  user-select: none;
+}
+.special-header:hover { background: var(--tan-light); }
+.special-header h2 { font-size: 18px; font-weight: 700; color: var(--deep-red); }
+.dark .special-header h2 { color: var(--warm-orange); }
+.special-header .chevron { font-size: 20px; color: var(--text-muted); transition: transform 0.3s; }
+.special-section.open .special-header .chevron { transform: rotate(180deg); }
+.special-body { display: none; padding: 0 20px 20px; }
+.special-section.open .special-body { display: block; }
+.route-card {
+  padding: 12px;
+  margin: 8px 0;
+  background: var(--tan-light);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+.route-card h4 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.route-card p { font-size: 14px; color: var(--text-muted); }
+
+/* ── Restaurant table ── */
+.rest-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 14px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.rest-table th {
+  background: var(--deep-red);
+  color: #fff;
+  padding: 10px 14px;
+  text-align: left;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.rest-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.rest-table tr:last-child td { border-bottom: none; }
+.rest-table tr:nth-child(even) td { background: var(--tan-light); }
+
+/* ── Key Tips ── */
+.tip-grid {
+  display: grid; grid-template-columns: 1fr; gap: 10px;
+}
+@media (min-width: 500px) { .tip-grid { grid-template-columns: 1fr 1fr; } }
+.tip-card {
+  padding: 14px;
+  background: var(--tan-light);
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  font-size: 14px;
+}
+.tip-card .tip-icon { font-size: 20px; margin-bottom: 6px; }
+.tip-card strong { display: block; margin-bottom: 4px; }
+
+/* ── Buddy reminder ── */
+.buddy-reminder {
+  background: linear-gradient(90deg, #d4edda, #c3e6cb);
+  border-left: 4px solid var(--success);
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 16px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.dark .buddy-reminder { background: linear-gradient(90deg, #1a3a1a, #123312); }
+
+/* ── Footer ── */
+.footer {
+  text-align: center;
+  padding: 30px 20px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+@media (max-width: 480px) {
+  .hero h1 { font-size: 24px; }
+  .day-header .info h2 { font-size: 16px; }
+  .activity { padding-left: 30px; }
+}
+"""
+
+    # ── JavaScript ──
+    js = r"""
+document.addEventListener('DOMContentLoaded', function() {
+  // Collapsible sections
+  document.querySelectorAll('.day-header, .special-header').forEach(function(header) {
+    header.addEventListener('click', function() {
+      var card = this.closest('.day-card, .special-section');
+      card.classList.toggle('open');
+    });
+  });
+
+  // Today button
+  var todayBtn = document.getElementById('todayBtn');
+  if (todayBtn) {
+    todayBtn.addEventListener('click', function() {
+      var today = new Date();
+      var m = today.getMonth() + 1;
+      var d = today.getDate();
+      var y = today.getFullYear();
+      var dateStr = y + '-' + (m < 10 ? '0' + m : m) + '-' + (d < 10 ? '0' + d : d);
+      var dayCards = document.querySelectorAll('.day-card');
+      var found = false;
+      dayCards.forEach(function(card) {
+        card.classList.remove('today-highlight');
+        if (card.dataset.date === dateStr) {
+          card.classList.add('today-highlight');
+          card.classList.add('open');
+          card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          found = true;
+          // Also highlight nav button
+          document.querySelectorAll('.nav a').forEach(function(a) { a.classList.remove('active'); });
+          var navLink = document.querySelector('.nav a[href="#' + card.id + '"]');
+          if (navLink) navLink.classList.add('active');
+        }
+      });
+      if (!found) {
+        alert('No matching day for today (' + dateStr + '). Trip dates are March 27 - April 1, 2026.');
+      }
+    });
+  }
+
+  // Nav active on click
+  document.querySelectorAll('.nav a[href^="#"]').forEach(function(link) {
+    link.addEventListener('click', function() {
+      document.querySelectorAll('.nav a').forEach(function(a) { a.classList.remove('active'); });
+      this.classList.add('active');
+      // Open the target day
+      var target = document.querySelector(this.getAttribute('href'));
+      if (target) {
+        target.classList.add('open');
+      }
+    });
+  });
+
+  // Checkboxes with localStorage
+  document.querySelectorAll('.activity-check').forEach(function(cb) {
+    var key = 'moab_' + cb.dataset.id;
+    if (localStorage.getItem(key) === 'true') {
+      cb.checked = true;
+      cb.closest('.activity').classList.add('checked-off');
+    }
+    cb.addEventListener('change', function() {
+      localStorage.setItem(key, this.checked);
+      this.closest('.activity').classList.toggle('checked-off', this.checked);
+    });
+  });
+
+  // Dark mode toggle
+  var darkBtn = document.getElementById('darkToggle');
+  if (localStorage.getItem('moab_dark') === 'true') {
+    document.body.classList.add('dark');
+    darkBtn.textContent = '\u2600\uFE0F';
+  }
+  darkBtn.addEventListener('click', function() {
+    document.body.classList.toggle('dark');
+    var isDark = document.body.classList.contains('dark');
+    localStorage.setItem('moab_dark', isDark);
+    darkBtn.textContent = isDark ? '\u2600\uFE0F' : '\uD83C\uDF19';
+  });
+});
+"""
+
+    # ── Activity checkbox ID counter ──
+    act_id = [0]
+
+    def act_checkbox():
+        act_id[0] += 1
+        return f'<input type="checkbox" class="activity-check" data-id="act{act_id[0]}">'
+
+    def tag(label, value, href=None):
+        if href:
+            return f'<a class="tag" href="{href}" target="_blank" rel="noopener">{label} {value}</a>'
+        return f'<span class="tag">{label} {value}</span>'
+
+    def phone_tag(number):
+        digits = re.sub(r"[^\d+]", "", number)
+        return tag("📞", number, f"tel:{digits}")
+
+    def addr_tag(address):
+        return tag("📍", address, maps_link(address))
+
+    def hours_tag(hours):
+        return tag("🕐", hours)
+
+    def fee_tag(fee):
+        return tag("💵", fee)
+
+    def link_tag(label, url):
+        return tag("🔗", label, url)
+
+    # ── Build HTML body ──
+    html_parts = []
+    html_parts.append(f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Moab Spring Break 2026</title>
+<style>{css}</style>
+</head>
+<body>
+
+<!-- Nav -->
+<div class="nav">
+  <button class="today-btn" id="todayBtn">Today</button>
+  <a href="#day1">D1</a>
+  <a href="#day2">D2</a>
+  <a href="#day3">D3</a>
+  <a href="#day4">D4</a>
+  <a href="#day5">D5</a>
+  <a href="#day6">D6</a>
+  <a href="#susan">Susan</a>
+  <a href="#restaurants">Food</a>
+  <a href="#tips">Tips</a>
+  <button class="dark-toggle" id="darkToggle">🌙</button>
+</div>
+
+<!-- Hero -->
+<div class="hero">
+  <h1>Moab Spring Break 2026</h1>
+  <div class="subtitle">Denver → Glenwood Springs → Moab &nbsp;·&nbsp; March 27 – April 1</div>
+  <div class="family">
+    <span>Shawn</span>
+    <span>Susan</span>
+    <span>Charlotte (15)</span>
+    <span>Gabby (13)</span>
+  </div>
+</div>
+
+<div class="container">
+""")
+
+    # ═══════════════════════════════════════════
+    # DAY 1
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+<div class="day-card" id="day1" data-date="2026-03-27">
+  <div class="day-header">
+    <div class="info">
+      <h2>Day 1 — Friday, March 27</h2>
+      <div class="route">Denver → Glenwood Springs &nbsp;·&nbsp; ~2.5 hr drive</div>
+    </div>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="day-body">
+
+    <div class="reminder">🎂 Carol's Birthday — call from the road!</div>
+
+    <div class="period-label">Evening — Arrive &amp; Settle In</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>Arrive in Glenwood Springs</h3>
+          <div class="desc">No fixed plans Friday night. Grab dinner downtown or at Baron's Restaurant in the hotel. Walking distance to shops and restaurants on Grand Ave.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="lodging">
+      <h3>🏨 Hotel Colorado</h3>
+      <div class="detail-row"><span class="label">Address:</span> <a href="{maps_link('526 Pine St, Glenwood Springs, CO 81601')}" target="_blank">526 Pine St, Glenwood Springs, CO 81601</a></div>
+      <div class="detail-row"><span class="label">Phone:</span> <a href="tel:9709456511">(970) 945-6511</a></div>
+      <div class="detail-row"><span class="label">Check-in:</span> 4:00 PM &nbsp;|&nbsp; Check-out: 11:00 AM</div>
+      <div class="detail-row"><span class="label">Website:</span> <a href="https://www.hotelcolorado.com" target="_blank">hotelcolorado.com</a></div>
+      <div class="detail-row"><span class="label">Details:</span> Historic landmark hotel. Two presidents stayed here. Recently maintained, on-site restaurant, bar, and coffee shop (Legends). Walking distance to downtown and right across from the hot springs pool.</div>
+    </div>
+
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # DAY 2
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+<div class="day-card" id="day2" data-date="2026-03-28">
+  <div class="day-header">
+    <div class="info">
+      <h2>Day 2 — Saturday, March 28</h2>
+      <div class="route">Glenwood Springs → Moab &nbsp;·&nbsp; ~4 hr drive</div>
+    </div>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="day-body">
+
+    <div class="reminder">⏰ Hotel Colorado check-out by 11:00 AM</div>
+
+    <div class="period-label">Morning</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>Glenwood Hot Springs Pool</h3>
+          <div class="desc">World's largest hot springs pool — over two blocks long. Main pool 90°F, therapy pool 104°F. Water slides, splash pad, and diving area for the kids. Right across from Hotel Colorado. Pool passes already purchased.</div>
+          <div class="meta">
+            {addr_tag("401 N River St, Glenwood Springs, CO 81601")}
+            {hours_tag("9:00 AM – 9:00 PM")}
+            {link_tag("Website", "https://hotspringspool.com")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Afternoon</div>
+
+    <div class="lodging">
+      <h3>🏠 Moab Townhome (Airbnb)</h3>
+      <div class="detail-row"><span class="label">Address:</span> <a href="{maps_link('3853 S Red Valley Cir, Moab, UT 84532')}" target="_blank">3853 S Red Valley Cir, Moab, UT 84532</a></div>
+      <div class="detail-row"><span class="label">Host:</span> Evolve</div>
+      <div class="detail-row"><span class="label">Phone:</span> <a href="tel:7204086191">(720) 408-6191</a></div>
+      <div class="detail-row"><span class="label">Confirmation:</span> <span class="confirm-code">HMBFPHYYDT</span></div>
+      <div class="detail-row"><span class="label">Check-in:</span> 3:00 PM (self check-in with keypad) &nbsp;|&nbsp; Check-out: 10:00 AM</div>
+      <div class="detail-row"><span class="label">Cost:</span> $277/night × 4 nights + taxes = $1,284.39 total</div>
+      <div class="detail-row"><span class="label">Details:</span> Entire home with patio, near Arches. Full kitchen, pets allowed.</div>
+    </div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚵 Moab Brands / Bar M Trails</h3>
+          <div class="desc">First taste of Moab riding! Trail system 11 miles north of town on Hwy 191.</div>
+          <div class="meta">
+            {addr_tag("Old Hwy, Moab, UT 84532")}
+            {link_tag("Trailforks", "https://www.trailforks.com/region/moab-brand-trails/")}
+            {link_tag("BLM Info", "https://www.blm.gov/visit/bar-m-trail-system")}
+          </div>
+          <div class="trail-details">
+            <strong>Recommended Trails:</strong>
+            <ul>
+              <li><strong>Rusty Spur</strong> — Easy warm-up, great first taste of Moab</li>
+              <li><strong>Bar M Loop</strong> — Beginner/intermediate, connects the system</li>
+              <li><strong>North 40</strong> — Intermediate loop through classic Moab terrain</li>
+              <li><strong>Circle O</strong> — Slickrock riding with Arches views in the distance</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # DAY 3
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+<div class="day-card" id="day3" data-date="2026-03-29">
+  <div class="day-header">
+    <div class="info">
+      <h2>Day 3 — Sunday, March 29</h2>
+      <div class="route">Full Trail Day in Moab</div>
+    </div>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="day-body">
+
+    <div class="period-label">Morning Ride</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚵 Klonzo Trailhead</h3>
+          <div class="desc">Fast, rolling trails with beautiful scenery and slickrock. Perfect for intermediate riders. Under 2 hours for a solid loop.</div>
+          <div class="meta">
+            {addr_tag("Willow Springs Trail, Moab, UT 84532")}
+            {link_tag("Trailforks", "https://www.trailforks.com/region/klonzo/")}
+          </div>
+          <div class="trail-details">
+            <strong>Recommended Route:</strong>
+            <ul>
+              <li><strong>Borderline</strong> up to <strong>Gravitron</strong> (flowy, fast, fun)</li>
+              <li>Then <strong>Zoltar → Red Hot → Roller Coaster → Topspin</strong> for more challenge</li>
+              <li><strong>Dunestone</strong> to step it up further</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Lunch</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🍔 Milt's Stop &amp; Eat</h3>
+          <div class="desc">Moab's oldest restaurant since 1954. Burgers, fries, milkshakes. Eat at the picnic tables under the big tree. The BLT and onion rings are favorites. Get the shakes — they're legendary.</div>
+          <div class="meta">
+            {addr_tag("356 S Mill Creek Dr, Moab, UT 84532")}
+            {hours_tag("11:00 AM – 8:00 PM")}
+            {link_tag("Order", "http://www.toasttab.com/milts-stop-n-eat-356-s-mill-creek-dr")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Afternoon Ride</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚵 Slickrock Practice Loop</h3>
+          <div class="desc">The 2.3-mile practice loop is the full Slickrock experience in a manageable package. Same grippy sandstone, same wild terrain. Follow the painted white dashes.</div>
+          <div class="meta">
+            {addr_tag("Sand Flats Rd, Moab, UT 84532")}
+            {fee_tag("$10/vehicle (Sand Flats)")}
+            {link_tag("Info", "http://grandcountyutah.net/287/Sand-Flats-Recreation-Area")}
+          </div>
+          <div class="trail-details">
+            <strong>Key Tips:</strong>
+            <ul>
+              <li>Bring LOTS of water — no shade out there</li>
+              <li>Follow the painted white dashes on the rock</li>
+              <li>2.3-mile loop — same terrain as the full 10-mile route</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Dinner</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🥡 Arches Thai (Takeout)</h3>
+          <div class="desc">Highly recommended by locals for takeout after a big ride day. Order online for easy pickup.</div>
+          <div class="meta">
+            {addr_tag("60 N 100 W, Moab, UT 84532")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # DAY 4
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+<div class="day-card" id="day4" data-date="2026-03-30">
+  <div class="day-header">
+    <div class="info">
+      <h2>Day 4 — Monday, March 30</h2>
+      <div class="route">Arches National Park + Dead Horse Point</div>
+    </div>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="day-body">
+
+    <div class="period-label">Morning</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🏜️ Arches National Park</h3>
+          <div class="desc">No timed entry required in 2026 — arrive early for parking. Drive the scenic road, hit the Windows section, and hike to Delicate Arch (3 mi RT, 480 ft gain — the iconic Utah arch). Balanced Rock is a quick roadside stop.</div>
+          <div class="meta">
+            {addr_tag("Arches National Park, Moab, UT 84532")}
+            {hours_tag("Visitor Center 9 AM – 4 PM")}
+            {link_tag("NPS Info", "https://www.nps.gov/arch/planyourvisit/hours.htm")}
+          </div>
+          <div class="trail-details">
+            <strong>Delicate Arch Hike:</strong>
+            <ul>
+              <li>3 miles round trip, 480 ft elevation gain</li>
+              <li>The iconic Utah arch — must-do</li>
+              <li>Bring water and snacks</li>
+              <li>Arrive early to beat parking</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Afternoon Ride</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚵 Dead Horse Point — Intrepid Trail System</h3>
+          <div class="desc">16.6 miles of singletrack through juniper and pinyon above spectacular canyons. Mix of beginner and intermediate trails. Jaw-dropping canyon overlooks. Susan can run or gravel bike the paved park roads.</div>
+          <div class="meta">
+            {addr_tag("Dead Horse Point State Park, Moab, UT 84532")}
+            {hours_tag("6:00 AM – 10:00 PM")}
+            {fee_tag("$20/vehicle")}
+            {link_tag("Trail Info", "https://stateparks.utah.gov/parks/dead-horse/intrepid-trail/")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Dinner</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🍕 Antica Forma</h3>
+          <div class="desc">Wood-fired Neapolitan pizza. Order at the counter. Try the Pistachio pizza (trust the locals). Big outdoor patio with shade and misters.</div>
+          <div class="meta">
+            {addr_tag("267 N Main St, Moab, UT 84532")}
+            {hours_tag("11:00 AM – 9:00 PM")}
+            {link_tag("Website", "http://www.anticaforma.com/")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # DAY 5
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+<div class="day-card" id="day5" data-date="2026-03-31">
+  <div class="day-header">
+    <div class="info">
+      <h2>Day 5 — Tuesday, March 31</h2>
+      <div class="route">Last Ride Day</div>
+    </div>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="day-body">
+
+    <div class="period-label">Breakfast</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🥞 Cactus Jack's</h3>
+          <div class="desc">Best breakfast in Moab. The Big Biscuit is legendary — fried chicken, thick-cut bacon, biscuit, and country gravy. Get there by 7:30, it packs out fast. Great coffee.</div>
+          <div class="meta">
+            {addr_tag("196 S Main St, Moab, UT 84532")}
+            {hours_tag("7:00 AM – 2:00 PM")}
+            {link_tag("Website", "https://www.cactusjacksmoab.com/")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Morning Ride</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚵 Option A: Navajo Rocks</h3>
+          <div class="desc">17-mile intermediate loop system, 25 min drive north on Hwy 191 to Hwy 313. Combines Big Mesa, Ramblin, Rocky Tops, Coney Island, and Big Lonely trails. Figure-8 shape so you can cut it short. Flowy singletrack with some technical sections.</div>
+          <div class="meta">
+            {link_tag("Trailforks", "https://www.trailforks.com/region/navajo-rocks/")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚵 Option B: Return to Intrepid (Dead Horse Point)</h3>
+          <div class="desc">Return for more of the trail system, different loops than Day 4.</div>
+          <div class="meta">
+            {fee_tag("$20/vehicle")}
+            {link_tag("Trail Info", "https://stateparks.utah.gov/parks/dead-horse/intrepid-trail/")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Afternoon</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🏊 Pool / Patio Time at the Townhome</h3>
+          <div class="desc">Relax on the patio, cook dinner in the full kitchen. Well-earned rest.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="period-label">Dinner</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🍺 Moab Brewery</h3>
+          <div class="desc">Moab's only microbrewery since 1996. Big menu, family-friendly. Dead Horse Ale and Rocket Bike Lager are the classics. Solid burgers and pub fare.</div>
+          <div class="meta">
+            {addr_tag("686 S Main St, Moab, UT 84532")}
+            {hours_tag("11:00 AM – 8:00 PM")}
+            {link_tag("Website", "http://www.themoabbrewery.com/")}
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # DAY 6
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+<div class="day-card" id="day6" data-date="2026-04-01">
+  <div class="day-header">
+    <div class="info">
+      <h2>Day 6 — Wednesday, April 1</h2>
+      <div class="route">Moab → Denver &nbsp;·&nbsp; ~5.5 hr drive</div>
+    </div>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="day-body">
+
+    <div class="warning">⚠️ Gabby's tennis at Gates Tennis Center: 4:45 PM — leave by 7:30 AM!</div>
+    <div class="reminder">⏰ Airbnb checkout by 10:00 AM</div>
+
+    <div class="period-label">Morning</div>
+
+    <div class="activity">
+      <div class="act-header">
+        {act_checkbox()}
+        <div>
+          <h3>🚗 Drive Home to Denver</h3>
+          <div class="desc">Target departure: 7:30 AM → Arrive Denver ~1:00–2:00 PM. Quick breakfast at the townhome, load up the bikes, and hit the road. Grand Junction (~1.5 hrs) is a good pit stop for gas and a stretch.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="buddy-reminder">🐕 Pick up Buddy from Playful Pooch — April 2, 4:00 PM</div>
+
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # SUSAN'S ROUTES
+    # ═══════════════════════════════════════════
+    html_parts.append("""
+<div class="special-section" id="susan">
+  <div class="special-header">
+    <h2>🚴‍♀️ Susan's Routes</h2>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="special-body">
+    <div class="period-label">Gravel Biking</div>
+    <div class="route-card">
+      <h4>Highway 128 (River Road)</h4>
+      <p>Stunning canyon road along the Colorado River northeast of Moab. Relatively flat, scenic red rock walls. Can ride as far as you want and turn around.</p>
+    </div>
+    <div class="route-card">
+      <h4>Willow Springs Road</h4>
+      <p>Gravel route into the backside of Arches National Park from Lions Park trailhead. Great mixed-surface ride.</p>
+      <div class="meta" style="margin-top:8px;">
+        <a class="tag" href="https://www.strava.com/routes/gravel-biking/usa/utah/moab" target="_blank">🔗 Strava Routes</a>
+      </div>
+    </div>
+
+    <div class="period-label">Running</div>
+    <div class="route-card">
+      <h4>Moab Canyon Pathway</h4>
+      <p>Paved multi-use trail running along Hwy 191, connecting to several trailheads including Bar M.</p>
+    </div>
+    <div class="route-card">
+      <h4>Mill Creek Parkway</h4>
+      <p>Easy running trail from town, follows the creek.</p>
+    </div>
+    <div class="route-card">
+      <h4>Dead Horse Point Park Roads</h4>
+      <p>Paved roads with canyon views, low traffic.</p>
+    </div>
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # QUICK REFERENCE RESTAURANTS
+    # ═══════════════════════════════════════════
+    html_parts.append("""
+<div class="special-section" id="restaurants">
+  <div class="special-header">
+    <h2>🍽️ Quick Reference — Restaurants</h2>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="special-body">
+    <div style="overflow-x:auto;">
+    <table class="rest-table">
+      <thead>
+        <tr><th>Restaurant</th><th>Best For</th><th>Address</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Arches Thai</td><td>Takeout Thai — local #1 pick</td><td><a class="tag" href="https://maps.google.com/?q=60+N+100+W%2C+Moab+UT" target="_blank">60 N 100 W</a></td></tr>
+        <tr><td>Fiesta Mexicana</td><td>Authentic Mexican, family recipes</td><td><a class="tag" href="https://maps.google.com/?q=2+S+100+W%2C+Moab+UT" target="_blank">2 S 100 W</a></td></tr>
+        <tr><td>The Spoke on Center</td><td>Burgers, shakes, bike-themed</td><td><a class="tag" href="https://maps.google.com/?q=11+E+Center+St%2C+Moab+UT" target="_blank">11 E Center St</a></td></tr>
+        <tr><td>Quesadilla Mobilla</td><td>Food truck, huge quesadillas</td><td><a class="tag" href="https://maps.google.com/?q=Main+St+Moab+UT" target="_blank">Main St (yellow truck)</a></td></tr>
+        <tr><td>Jailhouse Caf&eacute;</td><td>Classic breakfast in historic building</td><td><a class="tag" href="https://maps.google.com/?q=101+N+Main+St%2C+Moab+UT" target="_blank">101 N Main St</a></td></tr>
+        <tr><td>Moab Diner</td><td>Retro diner, all-day breakfast</td><td><a class="tag" href="https://maps.google.com/?q=189+S+Main+St%2C+Moab+UT" target="_blank">189 S Main St</a></td></tr>
+        <tr><td>Spitfire Smokehouse</td><td>BBQ and smoked meats</td><td><a class="tag" href="https://maps.google.com/?q=95+N+Main+St%2C+Moab+UT" target="_blank">95 N Main St</a></td></tr>
+        <tr><td>Antica Forma</td><td>Wood-fired Neapolitan pizza</td><td><a class="tag" href="https://maps.google.com/?q=267+N+Main+St%2C+Moab+UT" target="_blank">267 N Main St</a></td></tr>
+        <tr><td>Milt's Stop &amp; Eat</td><td>Burgers, shakes since 1954</td><td><a class="tag" href="https://maps.google.com/?q=356+S+Mill+Creek+Dr%2C+Moab+UT" target="_blank">356 S Mill Creek Dr</a></td></tr>
+        <tr><td>Cactus Jack's</td><td>Best breakfast in Moab</td><td><a class="tag" href="https://maps.google.com/?q=196+S+Main+St%2C+Moab+UT" target="_blank">196 S Main St</a></td></tr>
+        <tr><td>Moab Brewery</td><td>Microbrewery, family-friendly</td><td><a class="tag" href="https://maps.google.com/?q=686+S+Main+St%2C+Moab+UT" target="_blank">686 S Main St</a></td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # KEY TIPS
+    # ═══════════════════════════════════════════
+    html_parts.append("""
+<div class="special-section" id="tips">
+  <div class="special-header">
+    <h2>💡 Key Tips</h2>
+    <span class="chevron">▼</span>
+  </div>
+  <div class="special-body">
+    <div class="tip-grid">
+      <div class="tip-card">
+        <div class="tip-icon">🌡️</div>
+        <strong>Spring Weather</strong>
+        Highs 60–70°F, lows 35–45°F. Layers are essential. Sun is intense even when cool.
+      </div>
+      <div class="tip-card">
+        <div class="tip-icon">💧</div>
+        <strong>Hydration</strong>
+        Desert riding is no joke. 2+ liters per person per ride minimum. Bring more than you think.
+      </div>
+      <div class="tip-card">
+        <div class="tip-icon">💵</div>
+        <strong>Fees</strong>
+        Sand Flats (Slickrock): $10/vehicle<br>Dead Horse Point: $20/vehicle
+      </div>
+      <div class="tip-card">
+        <div class="tip-icon">🏜️</div>
+        <strong>Arches — No Timed Entry</strong>
+        No timed entry required in 2026. Arrive early to avoid entrance lines and parking at popular spots.
+      </div>
+      <div class="tip-card">
+        <div class="tip-icon">⚠️</div>
+        <strong>Trail Ratings</strong>
+        Moab trail ratings are soft — what's rated intermediate here would often be advanced elsewhere. Start easier and work up.
+      </div>
+      <div class="tip-card">
+        <div class="tip-icon">🔧</div>
+        <strong>Bike Shops</strong>
+        Chile Pepper Bike Shop and Poison Spider Bicycles are both on Main St for mechanicals or last-minute gear.
+      </div>
+    </div>
+  </div>
+</div>
+""")
+
+    # ═══════════════════════════════════════════
+    # FOOTER
+    # ═══════════════════════════════════════════
+    html_parts.append(f"""
+</div><!-- /container -->
+
+<div class="footer">
+  Meredith Spring Break 2026 &nbsp;·&nbsp; Denver → Glenwood Springs → Moab<br>
+  March 27 – April 1 &nbsp;·&nbsp; Have an amazing trip! 🏜️
+</div>
+
+<script>{js}</script>
+</body>
+</html>
+""")
+
+    return "".join(html_parts)
+
+
+def main():
+    md_path = "spring-break-moab.md"
+    output_path = "moab-trip.html"
+
+    print(f"Reading itinerary from {md_path}...")
+    md_content = parse_markdown(md_path)
+
+    print("Generating HTML...")
+    html = build_html(md_content)
+
+    Path(output_path).write_text(html, encoding="utf-8")
+    print(f"Done! Generated {output_path} ({len(html):,} bytes)")
+
+
+if __name__ == "__main__":
+    main()
