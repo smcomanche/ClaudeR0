@@ -16,3 +16,11 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Secrets
+.env
+Scripts/.env
+
+# Price tracker data
+Scripts/price_history.csv
+Scripts/.last_alert_price
